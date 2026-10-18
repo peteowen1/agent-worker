@@ -1,0 +1,232 @@
+name: Agent worker
+
+# Overnight coding worker, paid from the Max plan's monthly API credit (not the
+# weekly limit). Each night it takes up to TWELVE open issues (one per run) Pete opened and labelled
+# `agent-ok` in any peteowen1 repo, has Claude Code (Haiku; Sonnet if labelled agent-sonnet) do it on a branch cut
+# from `dev`, has a second read-only Claude pass review the diff, and opens a PR
+# into `dev` with both reports. It never merges and never touches `main`: the PR
+# goes through Pete's normal review gate. Design notes: scripts/agent-worker/README.md. This is the PUBLIC copy: public repos only.
+on:
+  schedule:
+    # Up to twelve issues a night (Pete, 2026-10-18), one run every 10 minutes from
+    # 2:00 to 3:50 AM Sydney (AEDT; an hour earlier in winter). Each run claims its
+    # issue as it picks it, so parallel runs take different ones.
+    - cron: '0 15 * * *'
+    - cron: '10 15 * * *'
+    - cron: '20 15 * * *'
+    - cron: '30 15 * * *'
+    - cron: '40 15 * * *'
+    - cron: '50 15 * * *'
+    - cron: '0 16 * * *'
+    - cron: '10 16 * * *'
+    - cron: '20 16 * * *'
+    - cron: '30 16 * * *'
+    - cron: '40 16 * * *'
+    - cron: '50 16 * * *'
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repo (e.g. torp). Blank = oldest open agent-ok issue anywhere"
+        default: ""
+      issue:
+        description: Issue number in that repo
+        default: ""
+      model:
+        description: "Coding model. auto = Haiku, or Sonnet if the issue is labelled agent-sonnet (the reviewer is always Sonnet)"
+        type: choice
+        options: [auto, haiku, sonnet]
+        default: auto
+      effort:
+        description: "Coding effort. auto = xhigh for Haiku, high for Sonnet"
+        type: choice
+        options: [auto, high, xhigh, max]
+        default: auto
+  # Test path: a push to an agent-worker-* branch touching the worker runs the
+  # pick step only (prints what tonight's run would take), no agent.
+  push:
+    branches: ["agent-worker-*"]
+    paths: ["scripts/agent-worker/**", ".github/workflows/agent-worker.yml"]
+
+permissions:
+  contents: read
+  id-token: write   # GitHub OIDC token for Workload Identity Federation
+
+# A group holds at most one waiting run, and a newer one cancels it (2026-10-18:
+# four dispatches in a row lost the middle two), so one shared group cannot queue.
+# - a dispatch naming an issue: one group per issue, so different issues run in
+#   parallel and the two models on one issue take turns (one waits);
+# - each of the twelve nightly schedule slots has its own group, so they run in
+#   parallel; they start 10 minutes apart and pick.sh re-reads labels before
+#   picking, so they take different issues;
+# - a blank dispatch picks "the oldest agent-ok issue" in group 'auto';
+# - a test push gets its own group and can never cancel a real run.
+concurrency:
+  group: >-
+    agent-worker-${{ github.event_name == 'push' && format('push-{0}', github.run_id)
+    || github.event_name == 'schedule' && format('schedule-{0}', github.event.schedule)
+    || (inputs.repo != '' && inputs.issue != '') && format('{0}-{1}', inputs.repo, inputs.issue)
+    || 'auto' }}
+  cancel-in-progress: false
+
+jobs:
+  # Three jobs, so the agent never shares a machine with the GitHub token: the
+  # runner keeps every secret a job references in memory, and the agent has sudo.
+  # prepare (token) -> work (agent, no secrets) -> deliver (token, fresh machine).
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      repo: ${{ steps.pick.outputs.repo }}
+      issue: ${{ steps.pick.outputs.issue }}
+      model: ${{ steps.pick.outputs.model }}
+      model_short: ${{ steps.pick.outputs.model_short }}
+      effort: ${{ steps.pick.outputs.effort }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Pick tonight's issue
+        id: pick
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          # This copy is public (free Actions minutes; its logs and artifacts are public
+          # too), so it only takes issues in PUBLIC repos. peteowen1/ops runs the same
+          # worker for private repos.
+          WORKER_VISIBILITY: public
+          IN_REPO: ${{ inputs.repo }}
+          IN_ISSUE: ${{ inputs.issue }}
+          IN_MODEL: ${{ inputs.model || 'auto' }}
+          IN_EFFORT: ${{ inputs.effort || 'auto' }}
+        run: bash scripts/agent-worker/pick.sh
+
+      - name: Claim the issue and clone the repo at dev
+        if: steps.pick.outputs.repo != '' && github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          REPO: ${{ steps.pick.outputs.repo }}
+          ISSUE: ${{ steps.pick.outputs.issue }}
+        run: |
+          bash scripts/agent-worker/claim.sh
+          cp /tmp/issue.md _w.issue.md
+          tar -czf clone.tgz _w _w.issue.md
+
+      - uses: actions/upload-artifact@v4
+        if: steps.pick.outputs.repo != '' && github.event_name != 'push'
+        with:
+          name: clone
+          path: clone.tgz
+          retention-days: 1
+
+  # The agent's job: no secrets referenced. id-token is the Anthropic login.
+  work:
+    needs: prepare
+    if: needs.prepare.outputs.repo != '' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      outcome: ${{ steps.agent.outcome }}
+    env:
+      # Workload Identity Federation: repository variables (Settings > Secrets and
+      # variables > Actions > Variables), so the IDs live outside the public code.
+      ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+      ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+      ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+      ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+      ANTHROPIC_IDENTITY_TOKEN_FILE: /tmp/gha-jwt
+      # Per-issue caps (Pete, 2026-10-18): Haiku $1, Sonnet $3, review $1, so twelve
+      # runs cost at most about $16-48 on a bad night (typical: $0.10-1.00 an issue).
+      WORKER_BUDGET_USD: ${{ needs.prepare.outputs.model_short == 'sonnet' && '3' || '1' }}
+      REVIEW_BUDGET_USD: "1"
+      # Chosen by pick.sh: Haiku xhigh by default, Sonnet high for agent-sonnet issues.
+      MODEL: ${{ needs.prepare.outputs.model }}
+      EFFORT: ${{ needs.prepare.outputs.effort }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: clone
+
+      - name: Unpack the clone
+        run: tar -xzf clone.tgz && mv _w.issue.md /tmp/issue.md && rm clone.tgz
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 && claude --version
+
+      - name: Set up R (repos with a DESCRIPTION)
+        if: hashFiles('_w/DESCRIPTION') != ''
+        uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      # No GITHUB_PAT here (secrets stay out of this job), so a private GitHub
+      # Remote in DESCRIPTION fails to install; the agent reports that.
+      - name: Install the package's R dependencies
+        if: hashFiles('_w/DESCRIPTION') != ''
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: _w
+          extra-packages: any::devtools, any::testthat
+          dependencies: '"all"'
+
+      - name: Do the work (Claude Code), then review it (read-only Sonnet pass)
+        id: agent
+        # No GitHub token anywhere in this job, and the clone stores no credentials,
+        # so nothing the agent runs can push, comment or merge.
+        env:
+          REPO: ${{ needs.prepare.outputs.repo }}
+          ISSUE: ${{ needs.prepare.outputs.issue }}
+        run: bash scripts/agent-worker/run.sh
+
+      - name: Bundle the agent's commits and reports for the deliver job
+        if: always()
+        run: |
+          # Files only: run.sh made the bundle as agent (no git runs here, as runner,
+          # in the agent-owned clone).
+          mkdir -p _out
+          # Read as agent: a symlink it planted can then only point at what agent could read anyway.
+          for f in agent-summary.md agent-report.md review.md costs.txt worker-usage.json agent.bundle; do
+            # bounded: a planted multi-GB file cannot fill this runner (the bundle can be big)
+            if sudo -u agent test -f "/tmp/$f"; then
+              if [ "$f" = agent.bundle ]; then sudo -u agent cat "/tmp/$f" > "_out/$f"
+              else sudo -u agent head -c 1000000 "/tmp/$f" > "_out/$f"; fi
+            fi
+          done
+          ls -la _out
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-out
+          path: _out/
+          retention-days: 14
+
+  # A fresh machine: the agent could write anywhere on the work job's runner,
+  # including this repo's scripts, so the GitHub token is used only here, on code
+  # checked out after the agent finished. The agent's output arrives as data.
+  deliver:
+    needs: [prepare, work]
+    if: always() && needs.prepare.outputs.repo != '' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: agent-out
+          path: _out
+      - name: Open the PR into dev, or report on the issue
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          REPO: ${{ needs.prepare.outputs.repo }}
+          ISSUE: ${{ needs.prepare.outputs.issue }}
+          AGENT_OUTCOME: ${{ needs.work.outputs.outcome }}
+          MODEL_SHORT: ${{ needs.prepare.outputs.model_short }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/agent-worker/deliver.sh
