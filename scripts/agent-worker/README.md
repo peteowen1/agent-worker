@@ -33,7 +33,7 @@ Run one now: Actions, then "Agent worker", then Run workflow, with a repo and an
 | `pick.sh`: oldest open `agent-ok` issue opened by peteowen1, not already `agent-working`/`agent-pr`/`agent-failed` | prepare job | yes |
 | `claim.sh`: label `agent-working`, clone at `dev` (remote reset to the plain URL, no stored credentials), branch `agent/issue-N`, issue text (Pete's comments only); the clone goes to the work job as an artifact | prepare job | yes |
 | R and the package's dependencies, if there is a `DESCRIPTION` (public sources only) | work job | **no** |
-| `run.sh`: worker (`claude -p`, Sonnet, effort high, $8 cap, 250 turns), then reviewer (read-only tools, $2 cap) | work job | **no** |
+| `run.sh`: worker (`claude -p`: Haiku xhigh with a $1 cap, or Sonnet high with $3 for `agent-sonnet` issues; 250 turns, 75 min), then reviewer (Sonnet, read-only tools, $1 cap) | work job | **no** |
 | commits as a git bundle, plus the summary, review and costs, uploaded as an artifact | work job | no |
 | `deliver.sh`: bare clone, fetch the bundle, refuse any change under `.github/`, push, open the PR, relabel | **deliver job, fresh machine** | yes |
 

@@ -6,6 +6,9 @@
 # Writes repo= and issue= to $GITHUB_OUTPUT; both empty means nothing to do.
 set -euo pipefail
 OWNER=peteowen1
+# Mandatory: the public copy must never take a private repo (its logs are public),
+# so a missing or misspelt setting stops the run instead of searching everything.
+case "${WORKER_VISIBILITY:-}" in public|private) ;; *) echo "::error::WORKER_VISIBILITY must be public or private (got '${WORKER_VISIBILITY:-}')"; exit 1 ;; esac
 # Model: Haiku at effort xhigh by default (Pete, 2026-10-18; ~$0.10 an issue with
 # the 100k cap). An issue labelled agent-sonnet is a harder one and gets Sonnet at
 # effort high. A dispatch can force either with IN_MODEL / IN_EFFORT.
@@ -45,6 +48,9 @@ claimed() {
 
 if [ -n "${IN_REPO:-}" ] || [ -n "${IN_ISSUE:-}" ]; then
   : "${IN_REPO:?give both repo and issue}" "${IN_ISSUE:?give both repo and issue}"
+  # Visibility first, before anything about the issue reaches the (possibly public) log.
+  vis=$(gh repo view "$OWNER/$IN_REPO" --json visibility -q '.visibility|ascii_downcase')
+  [ "$vis" = "$WORKER_VISIBILITY" ] || { echo "::error::this worker only takes $WORKER_VISIBILITY repos"; exit 1; }
   # A dispatch may re-run a delivered or failed issue (e.g. the other model), but
   # never one a run is working on right now.
   st=$(gh issue view "$IN_ISSUE" -R "$OWNER/$IN_REPO" --json author,state,labels \
@@ -54,10 +60,6 @@ if [ -n "${IN_REPO:-}" ] || [ -n "${IN_ISSUE:-}" ]; then
   if claimed "$IN_REPO" "$IN_ISSUE"; then
     echo "::error::$IN_REPO#$IN_ISSUE is labelled agent-working: a run has it now (or one died; remove the label)"; exit 1
   fi
-  if [ -n "${WORKER_VISIBILITY:-}" ]; then
-    vis=$(gh repo view "$OWNER/$IN_REPO" --json visibility -q '.visibility|ascii_downcase')
-    [ "$vis" = "$WORKER_VISIBILITY" ] || { echo "::error::$IN_REPO is $vis; this worker only takes $WORKER_VISIBILITY repos"; exit 1; }
-  fi
   echo "Dispatched: $IN_REPO#$IN_ISSUE"
   out "$IN_REPO" "$IN_ISSUE"
   exit 0
@@ -65,7 +67,7 @@ fi
 
 # The exclusions go in the query, not a filter after it, so 50+ failed issues can
 # never hide a newer one past the page limit.
-q="user:$OWNER is:issue is:open ${WORKER_VISIBILITY:+is:$WORKER_VISIBILITY }author:$OWNER label:agent-ok -label:agent-working -label:agent-pr -label:agent-failed -label:agent-report"
+q="user:$OWNER is:issue is:open is:$WORKER_VISIBILITY author:$OWNER label:agent-ok -label:agent-working -label:agent-pr -label:agent-failed -label:agent-report"
 # The 5 oldest: if a parallel run (the twelve nightly slots start 10 minutes apart,
 # but GitHub can start them late) claimed one, take the next instead of idling.
 # The claim is made HERE, right after the check, so the race window is about a

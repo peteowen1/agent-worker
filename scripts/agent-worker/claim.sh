@@ -13,6 +13,10 @@ done
 # agent-failed comes off too, so a re-run that succeeds does not end with both labels.
 gh issue edit "$ISSUE" -R "$OWNER/$REPO" --add-label agent-working --remove-label agent-failed >/dev/null
 
+# Second check, right before the clone: a repo flipped private after it was picked
+# must never be cloned by the public copy (its artifacts are public).
+vis=$(gh repo view "$OWNER/$REPO" --json visibility -q '.visibility|ascii_downcase')
+[ "$vis" = "${WORKER_VISIBILITY:?}" ] || { echo "::error::repo visibility is not ${WORKER_VISIBILITY}; not cloning"; exit 1; }
 git clone -q "https://x-access-token:${GH_TOKEN}@github.com/$OWNER/$REPO.git" _w
 git -C _w remote set-url origin "https://github.com/$OWNER/$REPO.git"
 if ! git -C _w rev-parse -q --verify origin/dev >/dev/null; then

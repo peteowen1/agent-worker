@@ -100,12 +100,32 @@ jobs:
           IN_EFFORT: ${{ inputs.effort || 'auto' }}
         run: bash scripts/agent-worker/pick.sh
 
+      # GitHub disables scheduled workflows in a public repo after 60 days without
+      # activity, and this repo's work lands in other repos. Commit a dated marker
+      # here when the last commit is over 30 days old.
+      - name: Keep the schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          last=$(gh api repos/${{ github.repository }}/commits/main -q '.commit.committer.date')
+          age=$(( ( $(date +%s) - $(date -d "$last" +%s) ) / 86400 ))
+          echo "last commit $age days ago"
+          if [ "$age" -gt 30 ]; then
+            body=$(echo "keepalive $(date -u +%F)" | base64 -w0)
+            sha=$(gh api "repos/${{ github.repository }}/contents/.github/keepalive" -q .sha 2>/dev/null || true)
+            gh api -X PUT "repos/${{ github.repository }}/contents/.github/keepalive" \
+              -f message="keepalive: stop GitHub disabling the schedule" \
+              -f content="$body" ${sha:+-f sha="$sha"} >/dev/null && echo "keepalive committed"
+          fi
+
       - name: Claim the issue and clone the repo at dev
         if: steps.pick.outputs.repo != '' && github.event_name != 'push'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           REPO: ${{ steps.pick.outputs.repo }}
           ISSUE: ${{ steps.pick.outputs.issue }}
+          WORKER_VISIBILITY: public
         run: |
           bash scripts/agent-worker/claim.sh
           cp /tmp/issue.md _w.issue.md
