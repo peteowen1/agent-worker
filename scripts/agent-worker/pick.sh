@@ -45,6 +45,16 @@ claimed() {
   v=$(gh issue view "$2" -R "$OWNER/$1" --json labels -q 'any(.labels[]; .name == "agent-working")') || return 0
   [ "$v" != false ]
 }
+# The claim below runs before claim.sh, so in a repo no run has worked in yet the
+# labels do not exist and the claim fails. That left the worker idle for three
+# nights (2026-10-19 to 10-21): every candidate failed its claim, silently.
+ensure_labels() {
+  local l
+  for l in "agent-working:fbca04" "agent-pr:0e8a16" "agent-failed:b60205" "agent-sonnet:5319e7" "agent-report:1d76db"; do
+    # no --force: an existing label keeps its colour; "already exists" is the normal case
+    gh label create "${l%%:*}" -R "$OWNER/$1" --color "${l##*:}" >/dev/null 2>&1 || true
+  done
+}
 
 if [ -n "${IN_REPO:-}" ] || [ -n "${IN_ISSUE:-}" ]; then
   : "${IN_REPO:?give both repo and issue}" "${IN_ISSUE:?give both repo and issue}"
@@ -72,17 +82,26 @@ q="user:$OWNER is:issue is:open is:$WORKER_VISIBILITY author:$OWNER label:agent-
 # but GitHub can start them late) claimed one, take the next instead of idling.
 # The claim is made HERE, right after the check, so the race window is about a
 # second (claim.sh adding the same label again is a no-op).
+failed=0
 while read -r repo issue title; do
   [ -n "$repo" ] || continue
   if claimed "$repo" "$issue"; then echo "$repo#$issue is claimed by another run; trying the next"; continue; fi
   if [ "${GITHUB_EVENT_NAME:-}" != push ]; then
-    gh issue edit "$issue" -R "$OWNER/$repo" --add-label agent-working >/dev/null 2>&1 \
-      || { echo "::warning::could not claim $repo#$issue; trying the next"; continue; }
+    ensure_labels "$repo"
+    if ! err=$(gh issue edit "$issue" -R "$OWNER/$repo" --add-label agent-working 2>&1 >/dev/null); then
+      echo "::warning::could not claim $repo#$issue ($err); trying the next"; failed=$((failed + 1)); continue
+    fi
   fi
   echo "Tonight: $repo#$issue $title"
   out "$repo" "$issue"
   exit 0
 done < <(gh api -X GET search/issues -f q="$q" -f sort=created -f order=asc -f per_page=5 \
            -q '.items[] | "\(.repository_url | split("/") | last) \(.number) \(.title)"')
+# Not "nothing waiting" when every candidate was there but could not be claimed:
+# that is a fault, and the run goes red so it is seen in the morning.
+if [ "$failed" -gt 0 ]; then
+  echo "::error::$failed waiting issue(s) could not be claimed (see the warnings above); nothing taken tonight"
+  out "" ""; exit 1
+fi
 echo "No open agent-ok issue waiting; nothing to do tonight."
 out "" ""

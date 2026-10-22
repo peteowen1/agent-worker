@@ -104,7 +104,7 @@ jobs:
       # activity, and this repo's work lands in other repos. Commit a dated marker
       # here when the last commit is over 30 days old.
       - name: Keep the schedule alive
-        if: github.event_name == 'schedule'
+        if: always() && github.event_name == 'schedule'  # also on a red pick (claims failed)
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
