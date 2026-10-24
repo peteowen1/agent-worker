@@ -82,6 +82,14 @@ q="user:$OWNER is:issue is:open is:$WORKER_VISIBILITY author:$OWNER label:agent-
 # but GitHub can start them late) claimed one, take the next instead of idling.
 # The claim is made HERE, right after the check, so the race window is about a
 # second (claim.sh adding the same label again is a no-op).
+# Searched first, not fed in through < <(...): a failing search inside a process
+# substitution is invisible to set -e, so it used to log "nothing waiting" and
+# exit green, the same silent idle as the claim failures of 2026-10-19 to 10-21.
+if ! found=$(gh api -X GET search/issues -f q="$q" -f sort=created -f order=asc -f per_page=5 \
+               -q '.items[] | "\(.repository_url | split("/") | last) \(.number) \(.title)"'); then
+  echo "::error::the issue search failed (gh's error is above); nothing taken tonight"
+  out "" ""; exit 1
+fi
 failed=0
 while read -r repo issue title; do
   [ -n "$repo" ] || continue
@@ -95,8 +103,7 @@ while read -r repo issue title; do
   echo "Tonight: $repo#$issue $title"
   out "$repo" "$issue"
   exit 0
-done < <(gh api -X GET search/issues -f q="$q" -f sort=created -f order=asc -f per_page=5 \
-           -q '.items[] | "\(.repository_url | split("/") | last) \(.number) \(.title)"')
+done <<<"$found"
 # Not "nothing waiting" when every candidate was there but could not be claimed:
 # that is a fault, and the run goes red so it is seen in the morning.
 if [ "$failed" -gt 0 ]; then
