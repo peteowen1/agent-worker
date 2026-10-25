@@ -80,6 +80,18 @@ touched=$( { $G -C /tmp/clean.git -c core.quotePath=false log --no-renames --for
 if printf '%s\n' "$touched" | grep -qi '^\.github/'; then
   refuse "The change touches .github/, which the worker never pushes (the push token can edit workflows)."
 fi
+# A docs-drift issue (opened by ops scripts/docs-drift.sh) may only change the .md
+# files its checklist names, each as "- [ ] `path.md:line`". Enforced here, not in the
+# prompt. Fails closed: an issue that cannot be read is refused.
+meta=$(gh issue view "$ISSUE" -R "$OWNER/$REPO" --json labels,body) \
+  || refuse "Could not read the issue to check whether it is a docs-drift issue."
+if jq -e 'any(.labels[]; .name == "docs-drift")' <<<"$meta" >/dev/null; then
+  allowed=$(jq -r .body <<<"$meta" | tr -d '\r' | grep -oE '^- \[[ xX]\] `[^`]+\.md:[0-9]+`' \
+              | sed -E 's/^- \[[ xX]\] `//; s/:[0-9]+`$//' | sort -u)
+  [ -n "$allowed" ] || refuse "This docs-drift issue names no .md file, so the fix may change nothing."
+  extra=$(printf '%s\n' "$touched" | sed '/^$/d' | sort -u | grep -vxF -f <(printf '%s\n' "$allowed") || true)
+  [ -z "$extra" ] || refuse "A docs-drift fix may only change the .md files the issue names; this branch also changes: $(echo $extra)"
+fi
 # Pushing triggers this repo's own CI on the agent's code; refuse if that CI has secrets.
 if ! ci=$(python3 "$HERE/ci_guard.py" /tmp/clean.git "$BR" 2>&1); then
   refuse "Not pushed: this repo's CI would run the agent's unreviewed code with secrets. $(echo "$ci" | tr '\n' ' ')"
