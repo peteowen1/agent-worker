@@ -47,6 +47,9 @@ Run one now: Actions, then "Agent worker", then Run workflow, with a repo and an
   runs. The push happens in a separate job from a fresh checkout. Git there runs with `core.hooksPath=/dev/null`.
 - `WORKFLOW_PAT` can edit workflows, so a branch touching `.github/` (in any commit or the net diff) or containing a
   merge commit is never pushed.
+- An issue labelled `docs-drift` (opened by ops `scripts/docs-drift.sh`, which also dispatches the worker on it)
+  may only change the `.md` files its checklist names (`- [ ] \`path.md:line\``). `deliver.sh` refuses anything
+  else, and refuses if it cannot read the issue.
 - Pushing makes the target repo's own CI run the agent's unreviewed code, with that repo's secrets. `ci_guard.py`
   reads the target's workflows and refuses the push if any workflow that uses secrets would fire on the agent branch
   or a PR into `dev`. Checked 2026-10-18: torp, panna, bouncer, citiusdata, torpdata pass; inthegame-blog is refused
